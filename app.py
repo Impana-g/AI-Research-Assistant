@@ -40,14 +40,21 @@ if uploaded_file is not None:
     # Load embedding model
     embeddings = get_embedding_model()
 
-    # Create vector store
-    vector_store = create_vector_store(
-        chunks,
-        embeddings
-    )
+    # Create vector store only once
+    if "vector_store" not in st.session_state:
 
-    # Create retriever
-    retriever = get_retriever(vector_store)
+        st.session_state.vector_store = create_vector_store(
+            chunks,
+            embeddings
+        )
+
+        st.session_state.retriever = get_retriever(
+            st.session_state.vector_store
+        )
+
+    # Reuse the existing vector store and retriever
+    vector_store = st.session_state.vector_store
+    retriever = st.session_state.retriever
 
     st.success("PDF Loaded Successfully!")
 
