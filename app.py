@@ -5,6 +5,7 @@ from llm.llm import generate_response
 from rag.loader import load_pdf
 from rag.splitter import split_documents
 from rag.embeddings import get_embedding_model
+from rag.vector_store import create_vector_store
 
 # Page title
 st.set_page_config(page_title="AI Research Assistant")
@@ -30,8 +31,13 @@ if uploaded_file is not None:
 
     # Load PDF
     documents = load_pdf(temp_path)
-    chunks = split_documents(documents)
+    chunks = split_documents(documents) 
+    
     embeddings = get_embedding_model()
+    vector_store = create_vector_store(
+    chunks,
+    embeddings
+)
 
     st.success("PDF Loaded Successfully!")
 
@@ -39,10 +45,11 @@ if uploaded_file is not None:
 
     st.write(f"Total Pages: {len(documents)}")
     st.write(f"Total Chunks: {len(chunks)}")
-    st.success("Embedding model loaded successfully!")
+    st.success("Vector store created successfully!")
 
     
 st.divider()
+embeddings = get_embedding_model()
 
 # ---------------- Chatbot ----------------
 
