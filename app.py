@@ -3,6 +3,7 @@ import tempfile
 
 from llm.llm import generate_response
 from rag.loader import load_pdf
+from rag.splitter import split_documents
 
 # Page title
 st.set_page_config(page_title="AI Research Assistant")
@@ -28,12 +29,14 @@ if uploaded_file is not None:
 
     # Load PDF
     documents = load_pdf(temp_path)
+    chunks = split_documents(documents)
 
     st.success("PDF Loaded Successfully!")
 
     st.subheader("Document Information")
 
     st.write(f"Total Pages: {len(documents)}")
+    st.write(f"Total Chunks: {len(chunks)}")
 
     st.success("Document loaded successfully and is ready for processing.")
 
