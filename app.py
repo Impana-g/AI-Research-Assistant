@@ -1,8 +1,10 @@
-import streamlit as st
+import os
 import tempfile
 
+import streamlit as st
+
 from llm.llm import generate_response
-from rag.loader import load_pdf
+from rag.loader import load_document
 from rag.splitter import split_documents
 from rag.embeddings import get_embedding_model
 from rag.vector_store import create_vector_store
@@ -10,100 +12,126 @@ from rag.retriever import get_retriever
 
 # ---------------- Page Config ----------------
 
-st.set_page_config(page_title="AI Research Assistant")
+st.set_page_config(page_title="AI Research Assistant", page_icon="🤖")
 
 st.title("🤖 AI Research Assistant")
-st.write("Upload a PDF and ask questions about its content.")
+st.write("Upload a PDF, DOCX, or TXT file and ask questions about its content.")
 
-# ---------------- PDF Upload ----------------
+# ---------------- Session State ----------------
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "processed_file" not in st.session_state:
+    st.session_state.processed_file = None
+
+# ---------------- File Upload ----------------
 
 uploaded_file = st.file_uploader(
-    "Upload a PDF",
-    type=["pdf"]
+    "Upload a document",
+    type=["pdf", "docx", "txt"]
 )
 
 retriever = None
 
 if uploaded_file is not None:
 
-    # Save uploaded PDF temporarily
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-        temp_file.write(uploaded_file.read())
-        temp_path = temp_file.name
+    file_type = uploaded_file.name.split(".")[-1].lower()
 
-    # Load PDF
-    documents = load_pdf(temp_path)
+    # Only rebuild the vector store if this is a new file
+    if st.session_state.processed_file != uploaded_file.name:
 
-    # Split into chunks
-    chunks = split_documents(documents)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_type}") as temp_file:
+            temp_file.write(uploaded_file.read())
+            temp_path = temp_file.name
 
-    # Load embedding model
-    embeddings = get_embedding_model()
+        with st.spinner("Processing document..."):
 
-    # Create vector store only once
-    if "vector_store" not in st.session_state:
+            documents = load_document(temp_path, file_type)
+            chunks = split_documents(documents)
+            embeddings = get_embedding_model()
 
-        st.session_state.vector_store = create_vector_store(
-            chunks,
-            embeddings
-        )
+            full_text = "\n\n".join(doc.page_content for doc in documents)
 
-        st.session_state.retriever = get_retriever(
-            st.session_state.vector_store
-        )
+            # Short documents (resumes, short notes) fit entirely in the LLM's
+            # context window, so skip similarity-based retrieval for them —
+            # retrieval can miss sections a keyword-light question like
+            # "how many projects" needs to see in full.
+            st.session_state.full_text = full_text
+            st.session_state.use_full_document = len(full_text) < 6000
 
-    # Reuse the existing vector store and retriever
-    vector_store = st.session_state.vector_store
+            st.session_state.vector_store = create_vector_store(chunks, embeddings)
+            st.session_state.retriever = get_retriever(st.session_state.vector_store)
+            st.session_state.processed_file = uploaded_file.name
+            st.session_state.doc_info = {
+                "pages": len(documents),
+                "chunks": len(chunks),
+            }
+            st.session_state.messages = []  # fresh chat for a new document
+
+        os.unlink(temp_path)
+
     retriever = st.session_state.retriever
 
-    st.success("PDF Loaded Successfully!")
-
-    st.subheader("Document Information")
-
-    st.write(f"Total Pages: {len(documents)}")
-    st.write(f"Total Chunks: {len(chunks)}")
-
-    st.success("Vector Store Created Successfully!")
+    st.success(f"'{uploaded_file.name}' loaded successfully!")
+    st.caption(
+        f"{st.session_state.doc_info['pages']} page(s) · "
+        f"{st.session_state.doc_info['chunks']} chunk(s)"
+    )
 
 st.divider()
 
-# ---------------- Chatbot ----------------
+# ---------------- Chat History ----------------
 
-user_query = st.text_input("Enter your question:")
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+        if message["role"] == "assistant" and message.get("sources"):
+            with st.expander("Sources"):
+                for src in message["sources"]:
+                    st.markdown(f"**{src['label']}**")
+                    st.write(src["text"])
+                    st.divider()
 
-if st.button("Ask"):
+# ---------------- Chat Input ----------------
 
-    if uploaded_file is None:
-        st.warning("Please upload a PDF first.")
+user_query = st.chat_input("Ask a question about your document...")
 
-    elif not user_query.strip():
-        st.warning("Please enter a question.")
+if user_query:
 
+    if uploaded_file is None or retriever is None:
+        st.warning("Please upload a document first.")
     else:
+        st.session_state.messages.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.write(user_query)
 
-        with st.spinner("Searching document..."):
+        with st.chat_message("assistant"):
+            with st.spinner("Searching document..."):
 
-            # Retrieve relevant chunks
-            results = retriever.invoke(user_query)
+                if st.session_state.get("use_full_document"):
+                    # Small document: give the model everything, no retrieval gaps
+                    context = st.session_state.full_text
+                    sources = [{"label": "Full document", "text": context}]
+                else:
+                    results = retriever.invoke(user_query)
+                    context = "\n\n".join(doc.page_content for doc in results)
 
-            # Combine chunks into one context
-            context = "\n\n".join(
-                doc.page_content for doc in results
-            )
+                    sources = []
+                    for i, doc in enumerate(results, start=1):
+                        page = doc.metadata.get("page")
+                        label = f"Source {i}" + (f" (page {page + 1})" if page is not None else "")
+                        sources.append({"label": label, "text": doc.page_content})
 
-            # Generate answer using RAG
-            answer = generate_response(
-                user_query,
-                context
-            )
+                answer = generate_response(user_query, context)
 
-        st.success("Response Generated!")
+            st.write(answer)
+            with st.expander("Sources"):
+                for src in sources:
+                    st.markdown(f"**{src['label']}**")
+                    st.write(src["text"])
+                    st.divider()
 
-        st.write(answer)
-
-        with st.expander("Retrieved Context"):
-
-            for i, doc in enumerate(results, start=1):
-                st.markdown(f"### Chunk {i}")
-                st.write(doc.page_content)
-                st.divider()
+        st.session_state.messages.append(
+            {"role": "assistant", "content": answer, "sources": sources}
+        )
